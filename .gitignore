@@ -1,0 +1,28 @@
+# Training / evaluation artefacts
+outputs/
+wandb/
+*.ckpt
+*.pth
+
+# Build products of the CUDA rasterizer (rebuilt by entrypoint.sh)
+*.so
+*.o
+build/
+*.egg-info/
+gaussianmot/ops/diff-gaussian-rasterization/third_party/glm/doc/
+
+# Python
+__pycache__/
+*.py[cod]
+.cache/
+.ipynb_checkpoints/
+
+# Local working files, not part of the release
+backup/
+paper_new/
+TODO.md
+*.zip
+*.pdf
+*.png
+!assets/*.png
+.hydra/

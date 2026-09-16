@@ -1,0 +1,407 @@
+hydra:
+  run:
+    dir: /workspace/outputs/train/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: /workspace/outputs/train/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+task_name: "train"
+debug_mode: False
+seed: 42
+
+trainer:
+  accelerator: "cuda"
+  devices: 3          # GaussMOT run: all 3 GPUs (0,1,2). Launch with CUDA_VISIBLE_DEVICES=0,1,2.
+  strategy: "ddp_find_unused_parameters_true"  # aux heads (weight 0) + zero-init aug_proj may be unused early → avoid DDP crash
+  sync_batchnorm: False
+  max_epochs: 15 # [중심보정 8/27] 크기적응 offset 감독 검증 — 5ep는 판정 불가로 확인돼 15ep
+  precision: "32-true"
+  batch_size: 1    # CenterPoint: bs=2 OOMs at 24GB (query head cross-attn 대비 무거움) → bs=1 (peak ~13GB)
+  accumulate_grad_batches: 21 # 자동 계산 (effective//(bs*devices)) — instantiate_trainer에서 덮어씀
+  effective_batch_size: 63  # devices=3: bs(1) × devices(3) × accumulate(21) = 63 (64에 가장 가까운 3의 배수)
+  gradient_clip_val: 5.0
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  num_sanity_val_steps: 0
+  # validation은 마지막 epoch(24)에만 1회 — 매 epoch val 제거로 ~20-25분/epoch 절감.
+  check_val_every_n_epoch: ${trainer.max_epochs}
+
+loggers:
+  - _target_: lightning.pytorch.loggers.wandb.WandbLogger
+    project: "gaussianmot_${data.model_config.dataset_name}_${task.key}"
+    name: "${now:%Y-%m-%d_%H-%M-%S}_custom_experiment"
+    save_dir: "${hydra:runtime.output_dir}"
+    tags:
+      - "${data.img_params.name}"
+      - "visibility_${task.min_visibility}"
+
+callbacks:
+  - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: "${hydra:runtime.output_dir}/ckpt"
+    monitor: "train/loss"
+    filename: "epoch_{epoch:02d}_loss_{train/loss:.3f}"
+    save_top_k: -1   # 전 epoch 저장 (epoch sweep용; 디스크 1.5T 여유)
+    mode: "min"
+    save_last: True
+    every_n_epochs: 1
+    # [crash 복구성] monitor 지정 시 기본은 validation 후에만 저장 → val을 ep23에만 돌리는 우리 설정에선
+    #   중간 ckpt가 전혀 안 남음(NCCL crash로 4 epoch 유실 원인). train epoch 끝마다 저장하도록 강제.
+    save_on_train_epoch_end: True
+    auto_insert_metric_name: False
+
+  - _target_: lightning.pytorch.callbacks.LearningRateMonitor
+    logging_interval: "epoch"
+
+  - _target_: lightning.pytorch.callbacks.RichModelSummary
+    max_depth: 2
+
+  - _target_: gaussianmot.callbacks.progress_status.ProgressStatusCallback
+    status_path: /workspace/outputs/logs/train_status.txt
+    log_every_n_steps: 10
+
+optimizer:
+  name: "AdamW"
+  lr: 2e-4          # CRN recipe
+  weight_decay: 1e-4 # CRN recipe
+
+scheduler:
+  name: "MultiStepLR"   # CRN-style step decay (+ linear warmup)
+  milestones: []        # [8/24 사용자 결정] milestone 감쇠 자체를 제거 → lr 2e-4 고정.
+                        #   근거: 기존 [16,22]는 ep22부터 lr 2e-6으로 죽어 ep17~22 지표가 정체했고,
+                        #   감쇠가 성능 개선에 기여하지 못한다고 판단. (빈 리스트면 lambda가 f=1.0 유지)
+  gamma: 0.1
+  warmup_epochs: 1
+  # OneCycle params kept for reference (unused by MultiStepLR branch):
+  max_lr: ${optimizer.lr}
+  pct_start: 0.05
+  div_factor: 3.0
+  final_div_factor: 20
+  cycle_momentum: False
+  anneal_strategy: "linear"
+
+data:
+  # defaults:
+  #   - img_params: scale_0_5
+  _target_: gaussianmot.data.DataModule
+  dataset: 'nuscenes_generated'
+  debug_mode: ${debug_mode}
+
+
+  # 0.5 scale
+  img_params:
+    name: "scale_0_5"
+    scale: [0.495, 0.505]
+    zoom_lim: [0.95, 1.05]
+    final_dim: [448, 800]
+    rot_lim: [-2.5, 2.5]
+    crop_up_pct: [0.83, 0.83]
+    rand_flip: False
+    H: 900
+    W: 1600
+
+  data_config:
+    img_params: ${data.img_params}
+    version: 'v1.0-trainval'
+    dataset_dir: /root/data/nuscenes/nuscenes/original/full/
+    labels_dir: /root/data/nuscenes/nuscenes/original/full/labels/
+    cameras: [[0, 1, 2, 3, 4, 5]]
+    bev:
+      h: 200
+      w: 200
+      h_meters: 100.0
+      w_meters: 100.0
+      offset: 0.0
+    image:
+      h: 224 #224
+      w:  480 #480
+      top_crop: 46
+    render:
+      x_min: -50
+      x_max: 50
+      y_min: -50
+      y_max: 50
+      bev_h: 200
+      bev_w: 200
+    radar:
+      num_features: 51
+      max_points: 3500
+    bev_aug_conf: [30.,20.,0.,20.,0.,0.]
+    augment_bev: True
+    augment_img: True
+    split_intrin_extrin: False
+    vehicle: ${task.data.vehicle}
+    map_layers: ${task.data.map_layers}
+    # 학습할 class id 화이트리스트 (None = 10-class, [0] = car-only).
+    class_filter: ${task.data.class_filter}
+    # Phase 3b: temporal task가 켜져있을 때 dataset이 prev frame 반환
+    return_prev: ${task.tracking.temporal}
+    # 기하 ego-warp 제약: prev/현재 프레임의 augmentation(bev_augm·ida_mat) 공유 여부.
+    #   True  → 프레임별 독립 augmentation (rotation-invariance 유도, 단일 행렬 워프 불가)
+    #   False → augmentation 공유 → ego_motion 한 장으로 prev BEV를 현재 프레임에 기하 워프
+    # ego_motion(4x4, prev→현재 lidar 상대 변환) 키는 return_prev=True면 항상 sample에 추가됨.
+    independent_augmentation: True
+    # [multi-frame 8/21] temporal fusion에 쓸 이전 프레임 수 K (RCTrans식 다중프레임).
+    #   module.model.max_prev_frames와 반드시 같은 값. 1=기존 동작.
+    #   K=4: RCTrans 논문과 동일 조건("accumulate the information of 4 previous frames", p4).
+    #   비용: prev forward 3회 추가(no_grad) + 데이터 I/O 2.5배 → epoch ~9~11h 예상.
+    #   (radar는 num_sweeps=7 = 현재+이전 6 sweep으로 RCTrans의 "6 previous"와 이미 동일)
+    num_prev_frames: 1   # [복원 8/24] ayaw100b 원본 구조(K=1). 다중프레임 실험은 실패로 종료.
+    # [B① 판정 8/13] CBGS 순손실(공정비교 mAP −0.8%p 추정) → off. trailer AP0은 circle-NMS 문제였음.
+    cbgs: False
+
+  loader_config:
+    batch_size: ${trainer.batch_size}
+    num_workers: 8   # 4→8: GPU0 data-starve(NFS I/O 지연) 완화. 8×3rank=24 workers + main 3 < 40코어.
+    pin_memory: True
+    prefetch_factor: 4         # 2→4: NFS 지터 흡수용 prefetch 버퍼 확대
+    persistent_workers: True   # epoch마다 worker 재생성 안 함(긴 epoch + val 마지막만 → 재생성 비용 제거)
+
+  model_config:
+    depth_num: 64
+    depth_max: 61.0
+    dataset_name: 'nuscenes'
+
+module:
+  _target_: gaussianmot.modeling.module.GaussianMOTModule
+  losses: ${task.losses}
+  metrics: ${task.metrics}
+
+  model:
+    _target_: gaussianmot.modeling.model.GaussianMOT
+    embed_dims: 128
+    depth_num: ${data.model_config.depth_num}
+    depth_min: 1
+    depth_max: ${data.model_config.depth_max}
+    error_tolerance: 0.5
+    opacity_filter: 0.01
+    x_min: ${data.data_config.render.x_min}
+    x_max: ${data.data_config.render.x_max}
+    y_min: ${data.data_config.render.y_min}
+    y_max: ${data.data_config.render.y_max}
+    bev_h: ${data.data_config.render.bev_h}
+    bev_w: ${data.data_config.render.bev_w}
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ⭐ CORE CONTRIBUTION: Gaussian 경로 (절대 수정 금지)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    image_encoder:
+      _target_: gaussianmot.modeling.components.image_encoder.PixelsToGaussians
+      model_name: "resnet50"          # EfficientViT-L2 → ResNet-50 (CR3DT/CRN 백본 정합)
+      in_channels: 3
+      out_indices: [2, 3, 4]          # ResNet-50 reductions [8,16,32] (EfficientViT [1,2,3]와 동일 스케일)
+      out_channels: ${module.model.embed_dims}
+      pretrained: true
+
+      neck:
+        _target_: gaussianmot.modeling.components.image_encoder.AGPNeck
+
+        align_res_layer:
+          _target_: gaussianmot.modeling.components.image_encoder.AlignRes
+          mode: "upsample"
+          scale_factors: [1, 2, 4]
+
+        prepare_c_layer:
+          _target_: gaussianmot.modeling.components.image_encoder.PrepareChannel
+          in_channels: [512, 1024, 2048]   # ResNet-50 stage2/3/4 채널 (was EfficientViT [128,256,512])
+          depth_num: ${module.model.depth_num}
+          interm_c: 256
+          out_c: ${module.model.image_encoder.out_channels}
+
+    radar_encoder:
+      _target_: gaussianmot.modeling.components.radar_encoder.PointsToGaussians
+      in_channels: ${data.data_config.radar.num_features}
+      max_points: ${data.data_config.radar.max_points}
+      hidden_channels: 256
+      out_channels: ${module.model.embed_dims}
+
+    fuser:
+      _target_: gaussianmot.modeling.components.ConcatFuser
+      embed_dims: ${module.model.embed_dims}
+      out_channels: ${module.model.embed_dims}
+      num_blocks: 2
+      return_multi_scale: true
+
+    decoder:
+      _target_: gaussianmot.modeling.components.DetBEVEncoder
+      in_channels: ${module.model.embed_dims}
+      out_channels: ${mult:2, ${module.model.embed_dims}}
+      num_blocks: 3
+      use_global_context: true
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    # ========== Task Heads (Detection/Tracking) ==========
+    head: ${task.module.model.head}
+    track_head: ${task.module.model.track_head}
+    use_tracking: ${task.module.model.use_tracking}
+
+    # 기하 ego-warp: prev BEV feature를 ego_motion으로 현재 프레임에 워프 후 residual 주입.
+    # 실제 워프는 temporal=true일 때만(=batch에 prev_bev_feat이 채워질 때만) 동작한다.
+    temporal_warp: ${task.tracking.warp}
+    # [multi-frame 8/21] data.data_config.num_prev_frames와 동일해야 함
+    max_prev_frames: ${data.data_config.num_prev_frames}
+    # [B③] radar doppler 박스레벨 융합: radar 보정속도(cols 15,16)를 BEV 맵으로 splat해
+    #   head vel_head에 직접 공급 (task.module.model.head.use_radar_vel_fusion과 세트).
+    radar_vel_fusion: true
+
+task:
+  key: vehicle
+  min_visibility: 2
+
+  # CR3DT/CC-3DT++ style: dense CenterHead + 3-way affinity tracker.
+  tracking:
+    temporal: true
+    ema_teacher: false
+    ema_momentum: 0.999
+    # 기하 ego-warp: prev BEV feature를 ego_motion으로 현재 프레임에 워프 후 주입
+    warp: true
+    cross_frame_grad: true   # ④ prev 경로에 grad 허용(symmetric cross-frame). OOM/DDP 시 false로 fallback
+
+  data:
+    vehicle: True
+    map_layers: []
+    class_filter: null
+
+  module:
+    model:
+      head:
+        _target_: gaussianmot.modeling.components.CenterHead
+        in_channels: 256
+        hidden_channel: 128
+        num_classes: 10
+        num_proposals: 300
+        nms_kernel_size: 3
+        nms_rescale_factors: [1.0, 0.7, 0.7, 0.4, 0.55, 1.1, 1.0, 1.0, 1.5, 3.5]
+        track_embed_dim: 64
+        bev_h: ${data.data_config.render.bev_h}
+        bev_w: ${data.data_config.render.bev_w}
+        x_min: ${data.data_config.render.x_min}
+        x_max: ${data.data_config.render.x_max}
+        y_min: ${data.data_config.render.y_min}
+        y_max: ${data.data_config.render.y_max}
+        key: ${task.key}
+        ped_cone_classes: [5, 8]
+        # [B② 판정 8/13] dir-bin decode 보정 유해(mAOE 0.88→1.10) → off (진단C로 확정)
+        use_dir_classifier: false
+        # [B③ 판정 8/13] radar doppler 박스레벨 융합 유효(mAVE 0.86→0.79) → 유지
+        use_radar_vel_fusion: true
+        # [A-yaw 8/14] MultiBin yaw: sin/cos 회귀의 모드평균 붕괴(180°flip 원인) 해결.
+        #   yaw 개선 = mAOE + mAVE 동시 개선 (GT-yaw 진단: mover vel err 1.87→1.09 증명)
+        use_multibin_yaw: true
+        # [V-recon 8/19] Doppler→전체속도 해석적 재구성을 vel_head 입력에 주입.
+        #   진단: 이동객체가 gradient 92% 받는데도 과소예측(ratio 0.83/0.67/0.41)
+        #   = conv가 v=(s/ĥ·r̂)ĥ 를 학습 못함 → 해석적으로 계산해서 넣어줌.
+        use_radar_vel_recon: false  # [실패 8/20] +2.8%뿐, ayaw100b 원본 구조로 복원
+        # [T-vel 8/20] temporal displacement → 속도 (v = -track_offset/0.5s).
+        #   A/B(8/20): radar 재구성 단독은 yaw 의존이라 mAOE 0.86에서 효과 2.8%뿐.
+        #   temporal은 yaw·radar 무관 → 보행자 등 radar 미가시 클래스까지 커버.
+        use_temporal_vel: false     # [실패 8/21] mAVE 0.798로 악화 → off
+
+      track_head:
+        _target_: gaussianmot.modeling.components.track_head.TrackHead
+        dim_last: 256
+        embed_dim: 64
+        key: ${task.key}
+        skip_dim: ${module.model.embed_dims}   # ⑤ fused_bev(scale-0) skip 채널 수(=128)
+        proj_dim: 64                            # ③ contrastive projection 차원
+
+      use_tracking: True
+
+  losses:
+    _target_: gaussianmot.losses.MultipleLoss
+    modules_or_weights:
+      # Detection: CenterPoint-style (vanilla, no aux, no Hungarian)
+      set_weight: 1.0
+      set:
+        _target_: gaussianmot.losses.CenterPointLoss
+        num_classes: 10
+        cls_weight: 1.0
+        # [재균형 v2] heatmap_weight 0.1은 heatmap 학습 기아 → 검출 confidence 붕괴(mAP 0.14)로 실증 실패.
+        #   heatmap 3.0(사용자 지정) + box 5.0 → 기여 ~3:1로 heatmap 우위 유지하면서 box는 정규화+5×로 강화.
+        box_weight: 5.0
+        heatmap_weight: 3.0
+        bev_h: ${data.data_config.render.bev_h}
+        bev_w: ${data.data_config.render.bev_w}
+        x_min: ${data.data_config.render.x_min}
+        x_max: ${data.data_config.render.x_max}
+        y_min: ${data.data_config.render.y_min}
+        y_max: ${data.data_config.render.y_max}
+        gaussian_overlap: 0.1
+        min_radius: 2
+        code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        # [plateau fix] 전채널 정규화: 진단결과 全 회귀채널 res/std≈1~1.9 underfit → 채널 std로 나눠
+        #   조건화·gradient 균형. 값=수렴ckpt 측정 std (off_x,off_y,cz,log_w,log_l,log_h,sin,cos,vx,vy).
+        code_norm: [0.30, 0.30, 0.50, 0.65, 1.00, 0.30, 0.55, 0.85, 0.70, 0.52]
+        # [A-yaw 감사 8/14] 재도입: 조건("속도 여전히 lag면") 충족 — brecipe50 mAVE 0.77 정체.
+        #   정지 박스 72%가 velocity gradient를 0쪽으로 지배(doppler 제거 사유와 동일 구조).
+        #   code_norm(÷0.52)과 결합 폭주 방지 위해 cap 10→3 (이동체 gradient 최대 4×).
+        vel_moving_weight: true
+        vel_weight_cap: 3.0
+        heatmap_loss_type: gaussian_focal  # [rollback] QFL이 heatmap 4×↑로 회귀 기아 악화 → 원복
+        # [B② 판정 8/13] dir-bin off와 세트로 loss도 0 (head가 dir 출력 안 냄)
+        dir_weight: 0.0
+        # [A-yaw 8/14] MultiBin yaw loss (head.use_multibin_yaw와 세트)
+        multibin_yaw: true
+        yaw_bin_weight: 1.0
+        yaw_res_weight: 2.0
+        # [A-yaw] 3×3 이웃 감독: decode 피크(±1셀 지터)가 읽는 셀도 감독 (yaw·vel·dim 공통 이득)
+        neighborhood_weight: 0.4
+        # [중심보정 8/27] 크기 적응형 offset 감독. 실측 피크 셀 오차 중앙값 car 0.7 / truck 1.3 /
+        #   bus 1.4 / CV 2.2 / trailer 3.5 셀인데 기존 ±1셀 감독은 car 37%·trailer 87%를 놓쳤음.
+        #   감독 반경 = heatmap 가우시안 반경(car 4 / truck 7 / bus·trailer 11셀) → 피크 지터 포괄.
+        #   가우시안 감쇠 가중 + 반경 정규화로 클래스 간 gradient 균형 유지.
+        #   추론단계 보정(centroid·radar)은 모두 반증됨 → 학습단계 유일 경로.
+        offset_radius_scale: 1.0
+        offset_max_radius: 12
+        # [8/31] 1.0→0.3. offsup15(weight 1.0) 결과: mAP 31.2→31.5·mATE 0.573→0.558로 목표는 달성했으나
+        #   mAOE 0.719→0.773, mAVE 0.620→0.662로 악화되어 NDS가 38.8→38.1로 하락.
+        #   offset 감독이 같은 box_loss를 공유하는 yaw/vel 채널을 밀어낸 것으로 판단 → 가중치를 낮춰
+        #   중심 개선은 유지하면서 다른 회귀 head의 gradient를 회복시킨다.
+        offset_weight: 0.3
+        key: ${task.key}
+
+      # [AMOTP 리팩토링 ①] CenterTrack식 temporal offset 회귀 — 위치 기반 추적(주 tracking loss).
+      #   decimal(floor≈0)로 학습되고 추론 association에 직접 사용 → AMOTP 직결. (검증: 정지 offset
+      #   ≈0.06m, 움직임 |offset|≈|v|×0.5s, 방향 -v와 2°). SupCon(track)은 경량 보조로 강등.
+      track_offset_weight: 1.0
+      track_offset:
+        _target_: gaussianmot.losses.TrackOffsetLoss
+        bev_h: ${data.data_config.render.bev_h}
+        bev_w: ${data.data_config.render.bev_w}
+        x_min: ${data.data_config.render.x_min}
+        x_max: ${data.data_config.render.x_max}
+        y_min: ${data.data_config.render.y_min}
+        y_max: ${data.data_config.render.y_max}
+        offset_scale: 3.0   # 타깃 정규화[m] → L1 decimal
+        key: ${task.key}
+
+      # [SupCon 복원 v3] hw3.0 ablation에서 track_weight 0.1의 임베딩이 노이즈로 판명
+      #   (app-only AMOTA 0.120/IDS 19418 붕괴, w_app=0이 기본보다 +0.052). 감독 부족이 원인
+      #   → 3.0으로 복원해 appearance 임베딩 소생 (hw3.0 대비 단일 변수 변경).
+      #   주의: SupCon floor≈1.2 (decimal 불가) → track 표시값 ≈ 3.6+offset 예상.
+      track_weight: 3.0
+      track:
+        _target_: gaussianmot.losses.TrackLoss
+        temperature: 0.15
+        max_pixels_per_instance: 16
+        reg_weight: 1e-4
+        key: ${task.key}
+
+      # GaussMOT ④: Doppler consistency. Pulls the Augmented-Gaussian BEV velocity
+      # field toward the radar compensated-velocity measurement (no GT needed).
+      # [mAVE fix] 0.5→0.0 제거: 진단결과 radar 보정속도 타깃이 ~0.13m/s(정적 배경 반사)라
+      #   dense_vel을 0쪽으로 당겨 collapse를 오히려 강화했고, radar셀↔object-center 겹침 4.7%로 무효.
+      doppler_weight: 0.0
+      doppler:
+        _target_: gaussianmot.losses.DopplerConsistencyLoss
+        bev_h: ${data.data_config.render.bev_h}
+        bev_w: ${data.data_config.render.bev_w}
+        x_min: ${data.data_config.render.x_min}
+        x_max: ${data.data_config.render.x_max}
+        y_min: ${data.data_config.render.y_min}
+        y_max: ${data.data_config.render.y_max}
+        vel_cols: [15, 16]
+        xy_cols: [0, 1]
+        use_filter: true
+        key: ${task.key}
+
+  metrics: {}

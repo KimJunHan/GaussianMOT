@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diff_gaussian_rasterization"
+version = "1.0"
+description = "PyTorch Wrapper for Diff Gaussian Rasterization"
+authors = [
+    { name = "Team Inria, GRAPHDECO" }
+]
+requires-python = ">=3.10,<3.13"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["diff_gaussian_rasterization"]
