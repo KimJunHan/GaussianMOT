@@ -198,12 +198,23 @@ class TrackLoss(nn.Module):
                                             # 실제 config(train.yaml)=16 (개선 B: 8→16, 기본값 8과 다름)
         reg_weight: float = 1e-4,           # 임베딩 L2 정규화 항 가중치(collapse 방지용 약한 안전망)
         key: str = 'vehicle',               # 어떤 태스크 키의 임베딩/instance를 쓸지 (예: 'vehicle')
+        # [B1 임베딩 소생] true면 projection(`_track_proj`)을 무시하고 association이 실제 쓰는
+        #   `_track_embed`에 SupCon을 직접 건다. 기존 SimCLR식 분리(proj에 loss, embed로 매칭)는
+        #   proj가 판별력을 흡수해 embed가 감독을 간접으로만 받았고, 실측에서 w_e>0이 항상
+        #   악화(0.314→0.291→0.135)된 원인. 학습 공간 = 매칭 공간으로 일치시킨다.
+        supervise_embed: bool = False,
+        # [B2 중심 가중 샘플링] true면 instance 픽셀을 무작위가 아니라 '질량중심에서 가까운 순'으로
+        #   샘플한다. association은 중심 셀 근방에서 임베딩을 읽으므로, 감독 위치를 매칭이 읽는
+        #   위치와 일치시킨다(경계 픽셀은 이웃 객체와 섞여 노이즈 positive를 만들던 문제 완화).
+        center_weighted: bool = False,
     ):
         super().__init__()
         self.temperature = temperature
         self.max_pixels_per_instance = max_pixels_per_instance
         self.reg_weight = reg_weight
         self.key = key
+        self.supervise_embed = bool(supervise_embed)
+        self.center_weighted = bool(center_weighted)
 
     def _sample_pixels(
         self,
@@ -221,7 +232,14 @@ class TrackLoss(nn.Module):
             if n == 0:
                 continue
             k = min(n, self.max_pixels_per_instance)   # 너무 큰 객체도 최대 k개까지만 사용
-            sel = idx[torch.randperm(n, device=device)[:k]]  # n개 중 무작위로 k개 픽셀 선택
+            if self.center_weighted and n > k:
+                # [B2] 질량중심에서 가까운 픽셀 우선. association이 임베딩을 읽는 중심 셀 근방을
+                #   감독해 loss-공간과 매칭-공간의 '위치' 불일치를 없앤다.
+                ctr = idx.float().mean(dim=0, keepdim=True)          # [1,2] 인스턴스 질량중심
+                d2 = ((idx.float() - ctr) ** 2).sum(dim=1)           # [n] 중심까지 거리²
+                sel = idx[d2.argsort()[:k]]                          # 가까운 k개
+            else:
+                sel = idx[torch.randperm(n, device=device)[:k]]  # n개 중 무작위로 k개 픽셀 선택
             feats = embed_b[:, sel[:, 0], sel[:, 1]].T  # 선택 픽셀의 임베딩 추출 후 전치 → [k, D] (행=픽셀, 열=임베딩차원) 실제: [k≤16, 64]
             feats_list.append(feats)
             labels_list.append(torch.full((k,), iid, dtype=torch.long, device=device))  # 이 k개 픽셀의 라벨을 모두 iid로
@@ -287,7 +305,7 @@ class TrackLoss(nn.Module):
         # ③ projection head: contrastive는 projection(`_track_proj`)으로 계산(있으면 우선).
         #   없으면 기존 association 임베딩(`_track_embed`)으로 fallback.
         # 실제: key='vehicle' → proj_key='vehicle_track_proj'(③로 우선), 없으면 'vehicle_track_embed'로 fallback
-        proj_key = f"{self.key}_track_proj"
+        proj_key = f"{self.key}_track_embed" if self.supervise_embed else f"{self.key}_track_proj"
         embed_key = proj_key if proj_key in prediction else f"{self.key}_track_embed"
         inst_key = f"{self.key}_instance_id"    # batch에서 instance_id 맵을 꺼낼 키
 
@@ -311,8 +329,10 @@ class TrackLoss(nn.Module):
             ).squeeze(1).long()            # [B,1,H,W]→[B,H,W], 다시 정수 id로
 
         # Phase 3b: 이전 프레임 정보가 batch에 들어와 있으면 SupCon pool에 추가하여 cross-frame positive 형성
-        # ③ projection 일관성: 현재가 proj를 쓰면 prev도 proj(같은 공간)로 맞춘다.
-        prev_proj_key = f"prev_{self.key}_track_proj"
+        # ③ projection 일관성: 현재가 쓰는 공간(embed 또는 proj)과 prev도 동일 공간으로 맞춘다.
+        # [B1] supervise_embed=true면 prev도 embed를 쓴다 — cross-frame positive가 매칭 공간에 형성됨.
+        prev_proj_key = (f"prev_{self.key}_track_embed" if self.supervise_embed
+                         else f"prev_{self.key}_track_proj")
         prev_embed_key = prev_proj_key if prev_proj_key in batch else f"prev_{self.key}_track_embed"
         prev_inst_key = f"prev_{self.key}_instance_id"
         prev_embed = batch.get(prev_embed_key)   # 이전 프레임 임베딩 (없으면 None)
@@ -862,6 +882,12 @@ class DopplerConsistencyLoss(nn.Module):
         xy_cols: tuple = (0, 1),           # radar_points에서 (x, y) 좌표가 들어있는 컬럼 인덱스
         filter_col: int = -1,              # 유효성 필터에 쓸 컬럼(예: 유효 플래그)
         use_filter: bool = True,           # 필터 컬럼으로 잡음 반환점을 걸러낼지 여부
+        # [B3 λ_rad 소생] 이동 반사 선별. 기존 λ_rad=0의 사유: 박스/셀 평균 Doppler 타깃이
+        #   정지 배경 반사(가드레일·건물)에 지배돼 크기 ~0.13 m/s로 붕괴, dense_vel을 0으로
+        #   끌어당겨 속도 과소예측을 오히려 강화했다. compensated speed가 임계 이상인 반환점만
+        #   타깃으로 쓰면 '움직이는 것의 속도'만 감독하게 되어 이 오염이 제거된다.
+        moving_only: bool = False,         # true면 |v| >= min_speed 반환점만 타깃에 사용
+        min_speed: float = 0.8,            # 이동 판정 임계 [m/s] (정지 클러터의 보정속도 노이즈 상한)
         key: str = "vehicle",
     ):
         super().__init__()
@@ -872,6 +898,8 @@ class DopplerConsistencyLoss(nn.Module):
         self.xy_cols = xy_cols
         self.filter_col = filter_col
         self.use_filter = use_filter
+        self.moving_only = bool(moving_only)
+        self.min_speed = float(min_speed)
         self.key = key
 
     @torch.no_grad()   # 타겟은 레이더 측정 상수이므로 gradient 없음
@@ -892,6 +920,9 @@ class DopplerConsistencyLoss(nn.Module):
             keep = torch.ones_like(x, dtype=torch.bool)  # 사용할 점 마스크(초기 전부 True)
             if self.use_filter and abs(self.filter_col) <= pts.shape[1]:
                 keep &= pts[:, self.filter_col] > 0.5    # 유효 플래그가 켜진 점만 사용
+            if self.moving_only:
+                # [B3] 이동 반사만: 정지 배경 반사가 셀 평균을 0으로 끌어내리는 오염 차단.
+                keep &= (vx * vx + vy * vy) >= (self.min_speed ** 2)
             col = (W / 2.0 - y / self.res_col).long()    # y → BEV col 인덱스 (CenterPoint와 동일 규칙)
             row = (H / 2.0 - x / self.res_row).long()    # x → BEV row 인덱스
             keep &= (col >= 0) & (col < W) & (row >= 0) & (row < H)  # 격자 범위 안의 점만 유지

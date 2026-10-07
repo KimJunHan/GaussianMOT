@@ -532,6 +532,12 @@ class GaussianMOT(nn.Module):
         # augmenting scale-0 and resizing the aug field to match.
         # ① 잔차 주입: velocity+identity BEV를 aug_proj(zero-init)로 변환해 융합 BEV에 더함.
         if velocity_bev is not None:
+            # [추론 ablation 토글] GC_NO_VEL / GC_NO_ID: 증강 속성 채널을 0으로 만들어
+            #   해당 필드에 대한 모델의 의존도를 측정한다(학습은 그대로이므로 '기여'가 아닌 '의존').
+            if os.environ.get("GC_NO_VEL", "0") == "1":
+                velocity_bev = torch.zeros_like(velocity_bev)
+            if os.environ.get("GC_NO_ID", "0") == "1":
+                identity_bev = torch.zeros_like(identity_bev)
             aug = torch.cat([velocity_bev, identity_bev], dim=1)  # [B, 2+K, H, W]
             is_list = isinstance(fused_bev, (list, tuple))         # multi-scale 출력 여부
             f0 = fused_bev[0] if is_list else fused_bev            # scale-0(full-res)만 증강

@@ -167,7 +167,8 @@ data:
     # ego_motion(4x4, prev→현재 lidar 상대 변환) 키는 return_prev=True면 항상 sample에 추가됨.
     independent_augmentation: True
     # [multi-frame 8/21] train.yaml과 동일 K. mframe 이전 ckpt 평가 시 1로 내릴 것.
-    num_prev_frames: 4
+    num_prev_frames: 1   # [2026-10-01] 학습(embrev50)이 K=1 → ckpt에 temporal_proj 하나뿐.
+    #   4로 두면 temporal_proj2~4가 무작위 초기화되어 주입됨 → 반드시 학습과 동일하게 유지할 것.
 
   loader_config:
     batch_size: ${trainer.batch_size}

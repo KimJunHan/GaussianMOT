@@ -48,6 +48,9 @@ rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 log = logging.getLogger(__name__)
 
 
+# [fig4] 과밀 씬 가독성: true면 시각화에서 per-box 텍스트(GT:/ID:/score) 생략, 박스·색만.
+VIZ_MINIMAL_LABELS = False
+
 # (inlined from gaussianmot/utils/config.py)
 # config의 ${mult:..}, ${last_token:..} 보간(interpolation)을 위한 커스텀 resolver 등록.
 def register_new_resolvers():
@@ -457,10 +460,10 @@ def draw_bev_boxes(
             cv2.line(canvas, tuple(center_pix), tuple(front_mid), color, line_thickness + 1)
 
         # Score 라벨 — 박스 위에 confidence 표시
-        if show_score and scores is not None:
+        if show_score and scores is not None and not VIZ_MINIMAL_LABELS:
             text_pos = (corners_pix[3][0], corners_pix[3][1] - 2)
             cv2.putText(canvas, f"{scores[i]:.2f}", text_pos,
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.51, color, 2)
 
     return canvas
 
@@ -531,10 +534,10 @@ def draw_bev_tracks(
         cv2.line(canvas, tuple(center_pix), tuple(front_mid), color, box_thickness + 1)
 
         # ID 라벨
-        if show_id and tid >= 0:
+        if show_id and tid >= 0 and not VIZ_MINIMAL_LABELS:
             text_pos = (corners_pix[3][0], corners_pix[3][1] - 2)
             cv2.putText(canvas, f"ID:{tid}", text_pos,
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.59, color, 2)
 
     return canvas
 
@@ -652,11 +655,11 @@ def draw_3d_box_on_image(
         cv2.line(img, p1, p2, color, thickness, cv2.LINE_AA)
 
     # Label (top-front-left corner 위에)
-    if label is not None:
+    if label is not None and not VIZ_MINIMAL_LABELS:
         x, y = corners_2d[4]
         if 0 <= x < W and 0 <= y < H:
             cv2.putText(img, label, (x, max(y - 5, 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.68, color, 2, cv2.LINE_AA)
 
 
 # GT bbox 색상 (BGR)
@@ -743,7 +746,7 @@ def render_camera_view(
     # Camera name
     if cam_name:
         cv2.putText(img, cam_name, (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.02, (255, 255, 255), 2)
 
     return img
 
@@ -789,21 +792,19 @@ def render_multi_view(
         rows.append(row)
     grid = np.vstack(rows)      # 세로 2행 결합
 
-    # Legend (좌상단에 작게)
-    legend_y = grid.shape[0] - 50
+    # Legend — 확대 폰트에 맞춰 배경 밴드 + 간격 재배치 (겹침 방지)
+    legend_y = grid.shape[0] - 44
     legend_x = 10
-    # GT 박스 색
-    cv2.rectangle(grid, (legend_x, legend_y), (legend_x + 20, legend_y + 12), GT_COLOR, -1)
-    cv2.putText(grid, "GT", (legend_x + 25, legend_y + 11),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    # Pred (Det) 색
-    cv2.rectangle(grid, (legend_x + 60, legend_y), (legend_x + 80, legend_y + 12), (0, 255, 0), -1)
-    cv2.putText(grid, "Pred(Det)", (legend_x + 85, legend_y + 11),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    # Tracking 색
-    cv2.rectangle(grid, (legend_x + 175, legend_y), (legend_x + 195, legend_y + 12), (255, 0, 200), -1)
-    cv2.putText(grid, "Pred(Track ID)", (legend_x + 200, legend_y + 11),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.rectangle(grid, (0, legend_y - 14), (620, legend_y + 26), (0, 0, 0), -1)
+    cv2.rectangle(grid, (legend_x, legend_y), (legend_x + 26, legend_y + 16), GT_COLOR, -1)
+    cv2.putText(grid, "GT", (legend_x + 34, legend_y + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+    cv2.rectangle(grid, (legend_x + 105, legend_y), (legend_x + 131, legend_y + 16), (0, 255, 0), -1)
+    cv2.putText(grid, "Pred(Det)", (legend_x + 139, legend_y + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+    cv2.rectangle(grid, (legend_x + 330, legend_y), (legend_x + 356, legend_y + 16), (255, 0, 200), -1)
+    cv2.putText(grid, "Pred(Track ID)", (legend_x + 364, legend_y + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
     return grid
 
@@ -837,7 +838,7 @@ def render_radar_bev(
         cv2.circle(canvas, (px, py), point_size, point_color, -1)   # cyan 점
 
     cv2.putText(canvas, "Radar BEV", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 1.02, (255, 255, 255), 2)
     return canvas
 
 
@@ -864,7 +865,7 @@ def render_gt_bev(
 
     if len(gt_boxes) == 0:
         cv2.putText(canvas, "GT BEV", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.02, (255, 255, 255), 2)
         return canvas
 
     x_min, x_max, y_min, y_max = bev_range
@@ -896,13 +897,13 @@ def render_gt_bev(
         cv2.line(canvas, tuple(center_pix), tuple(front_mid), color, 2)
 
         # Instance ID
-        if show_id and instance_id >= 0:
+        if show_id and instance_id >= 0 and not VIZ_MINIMAL_LABELS:
             cv2.putText(canvas, f"GT:{instance_id}",
                         (corners_pix[3][0], corners_pix[3][1] - 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.59, color, 2)
 
     cv2.putText(canvas, "GT BEV", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 1.02, (255, 255, 255), 2)
     return canvas
 
 
@@ -925,7 +926,7 @@ def render_detection_bev(
         show_score=True, show_heading=True, line_thickness=2,
     )
     cv2.putText(canvas, "Detection BEV", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 1.02, (255, 255, 255), 2)
     return canvas
 
 
@@ -949,7 +950,7 @@ def render_tracking_bev(
         max_trail_length=max_trail_length,
     )
     cv2.putText(canvas, "Tracking BEV", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 1.02, (255, 255, 255), 2)
     return canvas
 
 
@@ -1146,6 +1147,8 @@ class PredictionCollector:
         device: str,
         nusc: NuScenes,
         viz_enabled: bool = True,
+        viz_scene_filter: list = None,   # [fig4] 지정 시 이 scene 이름들만 PNG 저장 (전체 렌더 방지)
+        viz_minimal_labels: bool = False,  # [fig4] true면 박스/색만 그리고 GT:/ID:/score 텍스트 생략(과밀 씬 가독성)
         viz_dir: Optional[str] = None,
         viz_bev_h: int = 400,
         viz_bev_w: int = 400,
@@ -1158,6 +1161,10 @@ class PredictionCollector:
         self.device = device
         self.nusc = nusc
         self.viz_enabled = viz_enabled
+        self.viz_scene_filter = set(viz_scene_filter) if viz_scene_filter else None
+        self.viz_minimal_labels = bool(viz_minimal_labels)
+        global VIZ_MINIMAL_LABELS
+        VIZ_MINIMAL_LABELS = self.viz_minimal_labels
         self.viz_dir = Path(viz_dir) if viz_dir else None
         self.viz_bev_h = viz_bev_h
         self.viz_bev_w = viz_bev_w
@@ -1337,11 +1344,50 @@ class PredictionCollector:
         for batch_idx, batch in enumerate(pbar):    # val 전체 순회(eval B=2)
             batch = self._to_device(batch)          # tensor를 GPU로
 
+            # ---------- Temporal: prev-frame encoding (학습 경로 미러링) ----------
+            # module.common_step과 동일하게 prev 프레임을 forward_track_only로 인코딩해
+            # batch["prev_bev_feat"]을 채운다. 이게 없으면 모델 내부 ego-warp가 조용히
+            # skip되어 학습(temporal 주입)과 추론(주입 없음)이 어긋난다.
+            t_prev_start = _now()
+            core = getattr(self.model, "model", self.model)       # LightningModule → GaussianMOT
+            if getattr(core, "temporal_warp", False) and "prev_image" in batch:
+                # [GC_TEMPORAL_CACHE=1] 스트리밍 캐시 모드: 직전 프레임 forward에서 포착한
+                #   주입 전 fused BEV를 재사용해 두 번째 인코더 패스를 없앤다.
+                #   (학습은 forward_track_only=densify 미적용본을 썼으므로 의미가 달라 검증 필요.)
+                use_cache = os.environ.get("GC_TEMPORAL_CACHE", "0") == "1"
+                cached = getattr(self, "_bev_cache", None)
+                same_scene = getattr(self, "_bev_cache_scene", None) == batch.get("scene", [None])[0]
+                if use_cache and cached is not None and same_scene and cached.shape[0] == 1:
+                    batch["prev_bev_feat"] = cached
+                else:
+                    prev_batch = {k[len("prev_"):]: v for k, v in batch.items()
+                                  if k.startswith("prev_") and not k.startswith("prev2_")
+                                  and not k.startswith("prev3_") and not k.startswith("prev4_")}
+                    with torch.no_grad():
+                        prev_out = core.forward_track_only(prev_batch)
+                    for k, v in prev_out.items():
+                        if torch.is_tensor(v):
+                            batch[f"prev_{k}"] = v.detach()
+            t_prev_end = _now()
+
             # ---------- Model forward (timed) ----------
+            if os.environ.get("GC_TEMPORAL_CACHE", "0") == "1" and not hasattr(self, "_fuser_hook"):
+                _holder = {}
+                def _cap(_m, _i, o):
+                    _holder["v"] = (o[0] if isinstance(o, (list, tuple)) else o).detach()
+                self._fuser_hook = core.fuser.register_forward_hook(_cap)
+                self._fuser_holder = _holder
+
             t_model_start = _now()
             with torch.no_grad():
                 outputs = self.model(batch)         # GS 렌더 + dense head; outputs["output"]에 head 출력
             t_model_end = _now()
+
+            if os.environ.get("GC_TEMPORAL_CACHE", "0") == "1":
+                v = getattr(self, "_fuser_holder", {}).get("v")
+                self._bev_cache = v[-1:].clone() if v is not None else None
+                sc = batch.get("scene", [None])
+                self._bev_cache_scene = sc[-1] if isinstance(sc, (list, tuple)) else sc
 
             # ---------- Decoder (timed) ----------
             t_decoder_start = _now()
@@ -1412,6 +1458,8 @@ class PredictionCollector:
                 timings["tracker_ms"].append(tracker_ms)
 
                 if b == 0:      # model/decoder는 배치 전체에 1번 forward → 중복 카운트 방지
+                    timings.setdefault("prev_encode_ms", []).append(
+                        (t_prev_end - t_prev_start) * 1000)
                     model_ms = (t_model_end - t_model_start) * 1000
                     decoder_ms = (t_decoder_end - t_decoder_start) * 1000
                     timings["model_ms"].append(model_ms)
@@ -1423,7 +1471,8 @@ class PredictionCollector:
                 token = tokens[b] if isinstance(tokens, (list, tuple)) else tokens
 
                 # Viz 저장 (통합) - viz용 score threshold + top-K fallback
-                if self.viz_enabled and self.viz_dir is not None:
+                if self.viz_enabled and self.viz_dir is not None \
+                        and (self.viz_scene_filter is None or scene_name in self.viz_scene_filter):
                     gt_boxes = self._load_gt_boxes(batch, b)   # [M,12] GT 박스
 
                     # 1차: score threshold 적용 (저신뢰 박스 제거)
@@ -1804,11 +1853,22 @@ def ablation_affinity(
 
     results = {}
     for wcfg in tqdm(weight_configs, desc="Ablation: affinity", colour="yellow"):
-        w_app, w_loc, w_vel = [float(x) for x in wcfg]
+        # [B 결합스윕] 3원소 [w_app,w_loc,w_vel] 또는 4원소 [..., match_thr].
+        #   임베딩 항이 affinity 총점 스케일을 바꾸므로 thr 재조정 여지를 함께 탐색한다.
+        vals = [float(x) for x in wcfg]
+        w_app, w_loc, w_vel = vals[:3]
         new_cfg = dict(tracker_cfg)
         new_cfg["w_appearance"] = w_app
         new_cfg["w_location"] = w_loc
         new_cfg["w_velocity"] = w_vel
+        if len(vals) >= 4:
+            new_cfg["match_score_thr"] = vals[3]
+        # [2026-10-02] temporal 활성 후 재튜닝용: 코스팅 길이/속도 커널 폭도 스윕 대상.
+        #   vals[4]=max_miss(코스팅 프레임), vals[5]=r_vel(속도 affinity 감쇠 반경).
+        if len(vals) >= 5:
+            new_cfg["max_miss"] = int(vals[4])
+        if len(vals) >= 6:
+            new_cfg["r_vel"] = vals[5]
         tracker = CC3DTPPTracker(**new_cfg)
 
         current_scene = None
@@ -1829,7 +1889,9 @@ def ablation_affinity(
 
             new_predictions.append({**pred, "track_ids": tids})
 
-        key = f"app{w_app:.1f}_loc{w_loc:.1f}_vel{w_vel:.1f}"
+        key = f"app{w_app:.1f}_loc{w_loc:.1f}_vel{w_vel:.1f}" + (f"_thr{vals[3]:.2f}" if len(vals) >= 4 else "")
+        if len(vals) >= 5: key += f"_miss{int(vals[4])}"
+        if len(vals) >= 6: key += f"_rv{vals[5]:.1f}" 
         track = _compute_track_metric(
             new_predictions, nusc_dataroot, version, eval_set,
             output_dir=f"{output_dir}/affinity_{key}",
@@ -2155,7 +2217,7 @@ def error_map(pred_boxes, pred_scores, gt_boxes):
         _draw_box(canvas, g[i, 0], g[i, 1], g[i, 3], g[i, 4], gyaw, (0, 230, 230), 2)  # yellow FN
     # legend
     for k, (txt, col) in enumerate([("correct(TP)", (0, 220, 0)), ("incorrect(FP)", (0, 0, 230)), ("missing(FN)", (0, 230, 230))]):
-        cv2.putText(canvas, txt, (8, 20 + 22 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+        cv2.putText(canvas, txt, (8, 20 + 22 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.85, col, 2, cv2.LINE_AA)
     return canvas
 
 
@@ -2207,7 +2269,7 @@ def generate_fig6(cfg: DictConfig) -> None:
             emap = error_map(pb, ps, gtb)                # TP/FP/FN 오류맵
             # labels
             for img, t in [(pca_c, "PCA camera feat"), (pca_r, "PCA radar feat"), (emap, "detection error map")]:
-                cv2.putText(img, t, (8, BEV_PX - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(img, t, (8, BEV_PX - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 1, cv2.LINE_AA)
             strip = np.hstack([cam, pca_c, pca_r, emap])   # 4패널 가로 결합 → 한 줄짜리 그림
             cv2.imwrite(os.path.join(out_dir, f"fig6_{n:02d}.png"), strip)
             print(f"saved fig6_{n:02d}.png")
@@ -2330,6 +2392,8 @@ def main(cfg: DictConfig) -> None:
         viz_bev_w=cfg.viz_bev_w,
         viz_max_trail=cfg.viz_max_trail,
         viz_score_threshold=cfg.get("viz_score_threshold", 0.1),
+        viz_scene_filter=list(cfg.get("viz_scene_filter", []) or []) or None,
+        viz_minimal_labels=bool(cfg.get("viz_minimal_labels", False)),
     )
     # [진단 후처리] cfg.diag.* 플래그 전달 (기본 off — evaluate.yaml 참조)
     diag_cfg = cfg.get("diag", {}) or {}
@@ -2341,6 +2405,17 @@ def main(cfg: DictConfig) -> None:
                     f"yaw_from_velocity={collector.diag_yaw_from_velocity} — 상한측정용, 논문수치 아님")
     predictions, timings = collector.run(val_loader)   # 여기서 모델 forward는 단 1회(이후 재사용)
     log.info(f"Collected {len(predictions)} predictions.")
+
+    # [선택] 예측 덤프: GC_DUMP_PRED=<경로> 를 주면 수집 결과를 pickle 로 저장한다.
+    #   tracker 변형(가중치/매칭 규칙)을 시험할 때 forward 를 다시 돌릴 필요가 없어진다.
+    #   모델 출력만 담기므로 tracker 설정과 무관하다.
+    _dump = os.environ.get("GC_DUMP_PRED", "")
+    if _dump:
+        import pickle
+        os.makedirs(os.path.dirname(_dump) or ".", exist_ok=True)
+        with open(_dump, "wb") as _f:
+            pickle.dump(predictions, _f, protocol=4)
+        log.info(f"[DUMP] predictions -> {_dump} ({len(predictions)} samples)")
 
     # =======================================================================
     # 4. Main metrics — 전체 val에 대한 공식 Detection/Tracking 수치

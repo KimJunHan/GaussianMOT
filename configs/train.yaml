@@ -14,7 +14,7 @@ trainer:
   devices: 3          # GaussMOT run: all 3 GPUs (0,1,2). Launch with CUDA_VISIBLE_DEVICES=0,1,2.
   strategy: "ddp_find_unused_parameters_true"  # aux heads (weight 0) + zero-init aug_proj may be unused early → avoid DDP crash
   sync_batchnorm: False
-  max_epochs: 15 # [중심보정 8/27] 크기적응 offset 감독 검증 — 5ep는 판정 불가로 확인돼 15ep
+  max_epochs: 50 # [B 9/18] 임베딩·λ_rad 소생 본학습 — 50ep 최종모델과 공정 비교(동일 warm-start·동일 epoch)
   precision: "32-true"
   batch_size: 1    # CenterPoint: bs=2 OOMs at 24GB (query head cross-attn 대비 무거움) → bs=1 (peak ~13GB)
   accumulate_grad_batches: 21 # 자동 계산 (effective//(bs*devices)) — instantiate_trainer에서 덮어씀
@@ -350,7 +350,7 @@ task:
         #   감독 반경 = heatmap 가우시안 반경(car 4 / truck 7 / bus·trailer 11셀) → 피크 지터 포괄.
         #   가우시안 감쇠 가중 + 반경 정규화로 클래스 간 gradient 균형 유지.
         #   추론단계 보정(centroid·radar)은 모두 반증됨 → 학습단계 유일 경로.
-        offset_radius_scale: 1.0
+        offset_radius_scale: 0.0   # [B 9/18] off — 단일변수 비교(offsup 실험 종료, ayaw 원본 loss 구성)
         offset_max_radius: 12
         # [8/31] 1.0→0.3. offsup15(weight 1.0) 결과: mAP 31.2→31.5·mATE 0.573→0.558로 목표는 달성했으나
         #   mAOE 0.719→0.773, mAVE 0.620→0.662로 악화되어 NDS가 38.8→38.1로 하락.
@@ -384,15 +384,24 @@ task:
         temperature: 0.15
         max_pixels_per_instance: 16
         reg_weight: 1e-4
+        # [B 9/18] 임베딩 소생: 학습 공간 = 매칭 공간. proj 분리가 embed를 간접 감독만 받게 해
+        #   w_e>0이 항상 악화(0.314→0.291→0.135)된 원인 제거. + 중심 가중 샘플링으로
+        #   association이 임베딩을 읽는 위치를 직접 감독.
+        supervise_embed: true
+        center_weighted: true
         key: ${task.key}
 
       # GaussMOT ④: Doppler consistency. Pulls the Augmented-Gaussian BEV velocity
       # field toward the radar compensated-velocity measurement (no GT needed).
       # [mAVE fix] 0.5→0.0 제거: 진단결과 radar 보정속도 타깃이 ~0.13m/s(정적 배경 반사)라
       #   dense_vel을 0쪽으로 당겨 collapse를 오히려 강화했고, radar셀↔object-center 겹침 4.7%로 무효.
-      doppler_weight: 0.0
+      # [B 9/18] λ_rad 소생: moving_only로 정지 클러터 오염 제거 후 재활성.
+      #   기존 0.5는 오염 타깃 기준이라 보수적으로 0.2에서 시작.
+      doppler_weight: 0.2
       doppler:
         _target_: gaussianmot.losses.DopplerConsistencyLoss
+        moving_only: true
+        min_speed: 0.8
         bev_h: ${data.data_config.render.bev_h}
         bev_w: ${data.data_config.render.bev_w}
         x_min: ${data.data_config.render.x_min}

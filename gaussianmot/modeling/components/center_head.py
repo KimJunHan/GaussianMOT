@@ -34,13 +34,6 @@ class _SeparateHead(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int, hidden: int = 64, init_bias: float = 0.0):
         super().__init__()
-        # [①] 크기 사전: 학습에서 타깃에서 뺀 값을 디코드에서 되돌린다. 둘이 어긋나면
-        #   크기 예측이 조용히 무너지므로 losses.CenterPointLoss와 동일 값을 써야 한다.
-        if size_prior is not None:
-            import torch as _t
-            self.register_buffer("size_prior", _t.tensor([list(r) for r in size_prior], dtype=_t.float32))
-        else:
-            self.size_prior = None
         self.layers = nn.Sequential(
             nn.Conv2d(in_channels, hidden, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(hidden),
@@ -134,6 +127,13 @@ class CenterHead(nn.Module):
         **_ignored,
     ):
         super().__init__()
+        # [①] 크기 사전: 학습 타깃에서 뺀 클래스별 log(w,l,h)를 디코드에서 되돌린다. 둘이
+        #   어긋나면 크기 예측이 조용히 무너지므로 losses.CenterPointLoss와 동일 값이어야 한다.
+        if size_prior is not None:
+            self.register_buffer("size_prior",
+                                 torch.tensor([list(r) for r in size_prior], dtype=torch.float32))
+        else:
+            self.size_prior = None
         self.in_channels = in_channels
         self.hidden_channel = hidden_channel
         self.num_classes = num_classes
@@ -283,7 +283,8 @@ class CenterHead(nn.Module):
         #   fusion off와 동일하게 동작 — 어떤 경우에도 shape/gradient 경로는 일정하게 유지.
         vel_inputs = [sf]
         if self.use_radar_vel_fusion:
-            if radar_vel_map is None:
+            # [추론 ablation 토글] GC_NO_RADARVEL: Doppler 래스터 맵을 0으로 → 의존도 측정.
+            if radar_vel_map is None or __import__("os").environ.get("GC_NO_RADARVEL", "0") == "1":
                 radar_vel_map = sf.new_zeros(B, 5, H, W)
             radar_vel_map = radar_vel_map.to(sf.dtype)
             vel_inputs.append(radar_vel_map)
