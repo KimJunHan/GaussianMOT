@@ -2321,6 +2321,31 @@ def main(cfg: DictConfig) -> None:
         module.model.forward_features_camera = _cam_amp
         log.info(f"Camera-branch autocast enabled: {_amp} (radar branch stays fp32)")
 
+    # 추론 경량화(재학습 없음, 수식 동일). cfg에 없으면 비활성(기존 동작과 동일).
+    #  ① GroupNorm(1,C): B=1·G=1이면 PyTorch 커널이 행 1개를 블록 1개로 reduce해 호출당 ~4ms.
+    #     같은 식을 var_mean(병렬 reduction)으로 계산한다.
+    #  ② per-pixel track_head: tracker는 CenterHead의 검출별 query_track_embed를 우선 쓰므로
+    #     dense embedding 출력은 추론에서 쓰이지 않는다 → 생략.
+    #  ③ 카메라 neck(per-pixel Gaussian 속성 head) torch.compile.
+    if cfg.get("fast_infer", False):
+        import types
+        def _gn1_forward(self, x):
+            xf = x.float()
+            var, mean = torch.var_mean(xf, dim=(1, 2, 3), keepdim=True, correction=0)
+            y = (xf - mean) * torch.rsqrt(var + self.eps)
+            if self.affine:
+                y = y * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+            return y.to(x.dtype)
+        _n_gn = 0
+        for _m in module.model.modules():
+            if isinstance(_m, torch.nn.GroupNorm) and _m.num_groups == 1:
+                _m.forward = types.MethodType(_gn1_forward, _m)
+                _n_gn += 1
+        if getattr(module.model, "track_head", None) is not None:
+            module.model.track_head = None
+        module.model.image_encoder.neck = torch.compile(module.model.image_encoder.neck, dynamic=False)
+        log.info(f"Fast inference enabled: {_n_gn} GroupNorm(1,C) patched, dense track_head skipped, camera neck compiled")
+
     log.info("Loading NuScenes...")
     nusc = NuScenes(                              # scene name 조회용(metric 아님)
         version=cfg.version,

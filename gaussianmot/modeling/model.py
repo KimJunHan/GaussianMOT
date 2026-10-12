@@ -446,6 +446,9 @@ class GaussianMOT(nn.Module):
         sigma2 = 2.0 * (R / 2.0) ** 2
         offsets = [(di, dj) for di in range(-R, R + 1) for dj in range(-R, R + 1)
                    if di * di + dj * dj <= R * R]
+        # 오프셋 전체를 한 번에 벡터화(루프·동기화 없음). 가중치·좌표 규칙은 기존과 동일.
+        off = torch.tensor(offsets, device=device, dtype=torch.long)                # [K, 2]
+        w_off = torch.exp(-(off[:, 0] ** 2 + off[:, 1] ** 2).float() / sigma2)      # [K]
         for b, pts in enumerate(radar_points):
             if pts is None or pts.numel() == 0:
                 continue
@@ -458,21 +461,15 @@ class GaussianMOT(nn.Module):
             losx, losy = x / rn, y / rn          # 점별 LOS(ego→점) 단위벡터
             col = (W / 2.0 - y / res_col).long()
             row = (H / 2.0 - x / res_row).long()
-            wsum = torch.zeros(H * W, device=device)
-            acc = torch.zeros(4, H * W, device=device)   # vx, vy, losx, losy 가중합
-            for di, dj in offsets:
-                rr, cc = row + di, col + dj
-                valid = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
-                if valid.sum() == 0:
-                    continue
-                w = float(np.exp(-(di * di + dj * dj) / sigma2))
-                flat = rr[valid] * W + cc[valid]
-                ones_w = torch.full((int(valid.sum()),), w, device=device)
-                wsum.index_add_(0, flat, ones_w)
-                acc[0].index_add_(0, flat, w * vx[valid])
-                acc[1].index_add_(0, flat, w * vy[valid])
-                acc[2].index_add_(0, flat, w * losx[valid])
-                acc[3].index_add_(0, flat, w * losy[valid])
+            rr = row[:, None] + off[None, :, 0]                                     # [N, K]
+            cc = col[:, None] + off[None, :, 1]
+            valid = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
+            flat = (rr * W + cc)[valid]                                             # [M]
+            w = w_off[None, :].expand_as(rr)[valid]                                 # [M]
+            vals = torch.stack([vx, vy, losx, losy], dim=1)                         # [N, 4]
+            vals = vals[:, None, :].expand(-1, rr.shape[1], -1)[valid]              # [M, 4]
+            wsum = torch.zeros(H * W, device=device).index_add_(0, flat, w)
+            acc = torch.zeros(H * W, 4, device=device).index_add_(0, flat, w[:, None] * vals).t()
             occ = wsum > 1e-6
             norm = wsum.clamp(min=1e-6)
             out[b, 0] = (acc[0] / norm).view(H, W).to(dtype)
