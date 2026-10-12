@@ -321,6 +321,10 @@ class GaussianMOT(nn.Module):
             if bool(small.any()):                                             # clone: 위치 jitter
                 jit = torch.randn(int(small.sum()), 2, device=device) * self.densify_jitter
                 block["centers"][small, :2] = block["centers"][small, :2] + jit
+            # [추론 ablation 토글] GC_NO_INHERIT=1: 자식의 motion·identity 상속을 끔(0으로) → 상속 효과 측정.
+            if os.environ.get("GC_NO_INHERIT", "0") == "1":
+                block["velocities"].zero_()
+                block["identities"].zero_()
             for k in keys:
                 extra[k][b, :n] = block[k]
         out = dict(gaussians)
