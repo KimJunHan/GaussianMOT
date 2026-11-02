@@ -65,12 +65,15 @@ with that default. Changing the seed will move the last digit.
 
 ## Pretrained checkpoint
 
-The reported checkpoint is distributed separately because of its size:
+The reported checkpoint is on Hugging Face:
+[kimjunhan/GaussianMOT](https://huggingface.co/kimjunhan/GaussianMOT)
 
-**Download:** [Google Drive](https://drive.google.com/drive/project/1qB2_98QshIYjgws2UYHPCt7_EJHBilC9?usp=sharing)
+```bash
+hf download kimjunhan/GaussianMOT gaussianmot_epoch23.ckpt --local-dir ckpt
+```
 
-The file is `epoch_23_loss_3.587.ckpt`, the state at the end of the 24th
-(last) training epoch. Place it anywhere and pass the path to
+`gaussianmot_epoch23.ckpt` (368 MB) holds the model weights at the end of the
+24th (last) training epoch, without optimizer state. Pass its path to
 `checkpoint_path` below.
 
 ---
