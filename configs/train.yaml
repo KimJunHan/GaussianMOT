@@ -9,16 +9,20 @@ task_name: "train"
 debug_mode: False
 seed: 42
 
+# 보고 모델은 카메라–레이더 Gaussian 융합 ckpt(tracking head 없음)에서 가중치만 받아 시작한다.
+#   python tools/train.py warm_start_path=<fusion ckpt>
+warm_start_path: null
+
 trainer:
   accelerator: "cuda"
-  devices: 3          # GaussMOT run: all 3 GPUs (0,1,2). Launch with CUDA_VISIBLE_DEVICES=0,1,2.
+  devices: 2          # 보고 모델(noembed24): GPU 2장. CUDA_VISIBLE_DEVICES=0,1 로 실행.
   strategy: "ddp_find_unused_parameters_true"  # aux heads (weight 0) + zero-init aug_proj may be unused early → avoid DDP crash
   sync_batchnorm: False
-  max_epochs: 50 # [B 9/18] 임베딩·λ_rad 소생 본학습 — 50ep 최종모델과 공정 비교(동일 warm-start·동일 epoch)
+  max_epochs: 24 # 보고 모델 = 24 epoch 학습의 마지막 ckpt(epoch_23)
   precision: "32-true"
   batch_size: 1    # CenterPoint: bs=2 OOMs at 24GB (query head cross-attn 대비 무거움) → bs=1 (peak ~13GB)
   accumulate_grad_batches: 21 # 자동 계산 (effective//(bs*devices)) — instantiate_trainer에서 덮어씀
-  effective_batch_size: 63  # devices=3: bs(1) × devices(3) × accumulate(21) = 63 (64에 가장 가까운 3의 배수)
+  effective_batch_size: 62  # bs(1) × devices(2) × accumulate(31) = 62
   gradient_clip_val: 5.0
   limit_train_batches: 1.0
   limit_val_batches: 1.0
@@ -378,7 +382,9 @@ task:
       #   (app-only AMOTA 0.120/IDS 19418 붕괴, w_app=0이 기본보다 +0.052). 감독 부족이 원인
       #   → 3.0으로 복원해 appearance 임베딩 소생 (hw3.0 대비 단일 변수 변경).
       #   주의: SupCon floor≈1.2 (decimal 불가) → track 표시값 ≈ 3.6+offset 예상.
-      track_weight: 3.0
+      # 보고 모델은 contrastive(SupCon) 항을 끄고 학습(track_weight=0). identity 채널은 유지되며
+      #   검출·offset 목적함수로만 학습된다. association은 위치·속도만 사용(w_e=0).
+      track_weight: 0.0
       track:
         _target_: gaussianmot.losses.TrackLoss
         temperature: 0.15

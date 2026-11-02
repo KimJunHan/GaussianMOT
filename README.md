@@ -18,40 +18,60 @@ numbers.
 ## Results
 
 nuScenes validation split, standard protocol (ten detection classes, seven
-tracking classes), single frame, 448×800 input.
+tracking classes), 448×800 input, two frames (the current frame and the
+previous-frame BEV feature). These are the numbers reported in the paper
+(Tables I and II), measured with inference seed 0.
 
 | Detection | | Tracking | |
 |---|---|---|---|
-| mAP  | 31.6 | AMOTA  | 0.317 |
-| NDS  | 39.8 | AMOTP  | 1.353 |
-| mATE | 0.565 | Recall | 0.426 |
-| mASE | 0.315 | ID-S   | 1559 |
-| mAOE | 0.690 | | |
-| mAVE | 0.589 | | |
-| mAAE | 0.443 | | |
+| mAP  | 35.0 | AMOTA  | 0.348 |
+| NDS  | 42.5 | AMOTP  | 1.31 |
+| mATE | 0.539 | Recall | 0.411 |
+| mASE | 0.307 | ID-S   | 897 |
+| mAOE | 0.681 | | |
+| mAVE | 0.511 | | |
+| mAAE | 0.465 | | |
 
-Throughput on a single RTX 3090 (FP32, batch size 1) is 3.2 FPS; restricting
-mixed precision to the camera branch raises it to 4.2 FPS at a cost of 0.12 mAP.
+Throughput on a single RTX 3090 (batch size 1) is 6.5 FPS (paper Table III).
+See [Inference speed](#inference-speed) for the measurement.
+
+### Component analysis
+
+Paper Table IV removes one component at a time at inference of the final
+model (no retraining). Each component is switched off with an environment
+variable read by the model:
+
+| Variable | Effect |
+|---|---|
+| `GC_NO_VEL=1` | velocity channels of the augmented Gaussians set to zero |
+| `GC_NO_ID=1` | identity channels of the augmented Gaussians set to zero |
+| `GC_NO_RADARVEL=1` | radar Doppler input map set to zero |
+| `GC_DENSIFY=0` | cloning and splitting omitted |
+
+```bash
+GC_NO_RADARVEL=1 python tools/evaluate.py checkpoint_path=<ckpt> device=cuda
+```
 
 ### Reproducibility note
 
-The densification stage draws an isotropic perturbation when cloning a Gaussian,
+The densification stage draws a random planar shift when cloning a Gaussian,
 and it runs at inference as well as during training, so the forward pass is
 stochastic. Repeated evaluations of one checkpoint differ by up to 0.004 AMOTA
 and about 70 identity switches. `tools/evaluate.py` therefore fixes the
-inference seed (`eval_seed`, default `0`), and the numbers above are measured
+inference seed (`eval_seed`, default `0`), and all numbers above are measured
 with that default. Changing the seed will move the last digit.
 
 ---
 
 ## Pretrained checkpoint
 
-The final checkpoint (50 epochs) is distributed separately because of its size:
+The reported checkpoint is distributed separately because of its size:
 
 **Download:** [Google Drive](https://drive.google.com/drive/project/1qB2_98QshIYjgws2UYHPCt7_EJHBilC9?usp=sharing)
 
-The file is `last.ckpt` (about 1.0 GB), the state at the end of epoch 50. Place
-it anywhere and pass the path to `checkpoint_path` below.
+The file is `epoch_23_loss_3.587.ckpt`, the state at the end of the 24th
+(last) training epoch. Place it anywhere and pass the path to
+`checkpoint_path` below.
 
 ---
 
@@ -106,17 +126,22 @@ grid (200×200 over ±50 m).
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 python tools/train.py \
-    trainer.devices=2 \
-    trainer.max_epochs=50 \
-    trainer.effective_batch_size=62 \
-    +warm_start_path=<path-to-fusion-checkpoint>
+    warm_start_path=<path-to-fusion-checkpoint>
 ```
 
-The reported model is trained for 50 epochs at a constant learning rate of
-2e-4, batch size 1 per device with gradient accumulation to an effective batch
-of 62. `effective_batch_size` is divided by `batch_size × devices` to derive
-`accumulate_grad_batches`; change the effective size rather than the
-accumulation count.
+`configs/train.yaml` holds the recipe of the reported model: 24 epochs, AdamW
+at a constant learning rate of 2e-4 (one warm-up epoch), batch size 1 on each
+of two GPUs with 31-step gradient accumulation (effective batch 62), FP32.
+Training starts from the weights of a camera–radar Gaussian fusion checkpoint
+trained without the tracking head (`warm_start_path`; weights only, the
+optimizer starts fresh). `effective_batch_size` is divided by
+`batch_size × devices` to derive `accumulate_grad_batches`; change the
+effective size rather than the accumulation count.
+
+Loss weights (paper Table V): detection 1.0, temporal offset 1.0, selective
+Doppler consistency 0.2 (moving returns above 0.8 m/s). The contrastive
+identity term is off (`track_weight: 0.0`); the identity channels are kept and
+are trained through the detection and offset objectives.
 
 Validation runs once after the final epoch (`check_val_every_n_epoch` is tied
 to `max_epochs`).
@@ -136,19 +161,34 @@ options:
 
 | Option | Effect |
 |---|---|
-| `+camera_amp=bf16` | autocast on the camera branch only (radar and rasterizer stay FP32) |
 | `eval_seed=<int>` | inference seed; default `0` |
+| `+fast_infer=true` | parallel GroupNorm(1,C), skip the unused dense track head, compile the camera neck (same outputs) |
+| `+camera_amp=bf16` | autocast on the camera branch only (radar and rasterizer stay FP32) |
 | `ablation.affinity.enabled=True` | sweep the association weights (`w_e`, `w_p`, `w_v`) |
 | `ablation.distance_range.enabled=True` | per-range breakdown |
 | `ablation.track_match.enabled=True` | sweep the matching threshold |
 
-The association weights reported in the paper are
-`(w_p, w_v, w_e) = (0.5, 0.5, 0)`; the appearance term is inactive, and the
-sweep behind that choice is in the paper's appendix.
+Association uses position and velocity only, `(w_p, w_v, w_e) = (0.5, 0.5, 0)`,
+with matching threshold 0.5, track creation score 0.4, and maintenance score
+0.1. These are fixed in `tools/evaluate.py` (`tracker_cfg`).
 
 The distance-range and weather ablations partition the predictions but not the
 annotations, so their precision values are not comparable across partitions.
 Only true-positive errors such as mATE are meaningful there.
+
+### Inference speed
+
+```bash
+python tools/benchmark_latency.py checkpoint_path=<ckpt> --fast --camera-amp bf16
+```
+
+This times one current-frame forward pass at batch size 1 (median of 100
+runs after 10 warm-up runs). The previous-frame BEV feature is reused from the
+preceding frame, as in streaming inference. `--fast` and `--camera-amp bf16`
+apply the same changes as `+fast_infer=true` and `+camera_amp=bf16` in
+`tools/evaluate.py`. On an RTX 3090 this gives about 150–155 ms (6.5 FPS).
+In a matched evaluation of the reported checkpoint these options change
+AMOTA by less than 0.001 (0.3413 to 0.3408) and mAP by 0.09.
 
 ---
 
@@ -168,7 +208,7 @@ gaussianmot/
   losses.py                detection, tracking, and Doppler losses
   ops/                     differentiable Gaussian rasterizer (CUDA)
 configs/                   Hydra configs: train.yaml, evaluate.yaml
-tools/                     train.py, evaluate.py
+tools/                     train.py, evaluate.py, benchmark_latency.py
 Dockerfile, Makefile, entrypoint.sh, environment.yml
 ```
 
